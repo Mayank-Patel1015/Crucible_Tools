@@ -41,3 +41,21 @@ hooks:
 mcp:
   autoStart: false
   port: 3000
+
+# ── LLM Backend (Ollama — local, privacy-preserving) ──────────
+llm:
+  provider: ollama
+  model: qwen3:8b          # 4.9 GB — best general+code model on device
+  baseURL: http://localhost:11434
+  temperature: 0.1         # Low: deterministic code & coordination output
+  maxTokens: 4096
+  contextWindow: 32768     # qwen3:8b native context
+  timeout: 120000          # 2 min — allows complex multi-step agent tasks
+  # Multi-agent concurrency: Ollama queues requests, model stays loaded once
+  concurrency:
+    maxConcurrent: 15      # Matches maxAgents — all 15 agents can queue
+    requestTimeout: 60000  # Per-request timeout (ms)
+  # Fallback chain if primary model is unavailable
+  fallback:
+    - model: qwen2.5-coder:7b   # Code-specialised fallback (4.7 GB)
+    - model: phi3:mini           # Lightweight emergency fallback (2.2 GB)
