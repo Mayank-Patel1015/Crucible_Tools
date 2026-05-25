@@ -1,0 +1,118 @@
+{
+  "timestamp": "2026-05-25T09:57:40.667Z",
+  "mode": "headless",
+  "workerType": "optimize",
+  "model": "sonnet",
+  "durationMs": 193285,
+  "executionId": "optimize_1779702867382_50ap2b",
+  "success": true,
+  "findings": {
+    "sections": [
+      {
+        "title": "Performance Analysis: Crucible_Tools",
+        "content": "\nThis is a Node.js-based agent orchestration system, not a React app. There are no SQL ORMs or React components — the relevant patterns are **redundant disk I/O**, **repeated regex compilation**, **unbatched writes**, and **unthrottled sync calls**.\n\n---\n\n",
+        "level": 2
+      },
+      {
+        "title": "1. Redundant Disk Reads — \"N+1 File Read\" Pattern",
+        "content": "\n**`intelligence.cjs` — `boostConfidence()` reads two files on every feedback call**\n\nCalled from both `getContext()` (line ~545) and `feedback()` (line ~580), this function reads `RANKED_PATH` and `GRAPH_PATH`, modifies them, and writes both back — 4 reads + 2 writes per invocation.\n\n```javascript\n// CURRENT — in boostConfidence() at intelligence.cjs:587\nfunction boostConfidence(ids, amount) {\n  const ranked = readJSON(RANKED_PATH);   // disk read #1\n  // ...\n  if (changed) writeJSON(RANKED_PATH, ranked);  // disk write #1\n\n  const graph = readJSON(GRAPH_PATH);     // disk read #2\n  // ...\n  writeJSON(GRAPH_PATH, graph);           // disk write #2\n}\n\n// ALSO: getContext() calls both sessionGet() (reads SESSION_FILE)\n// AND boostConfidence() (reads RANKED_PATH again after just reading it above)\n```\n\n**Fix**: Cache the loaded objects in module-level variables and mark them dirty, then flush only at `consolidate()`:\n\n```javascript\nlet _rankedCache = null;\nlet _rankedDirty = false;\n\nfunction getRanked() {\n  if (_rankedCache) return _rankedCache;\n  _rankedCache = readJSON(RANKED_PATH);\n  return _rankedCache;\n}\n\nfunction flushRanked() {\n  if (_rankedDirty && _rankedCache) {\n    writeJSON(RANKED_PATH, _rankedCache);\n    _rankedDirty = false;\n  }\n}\n\nfunction boostConfidence(ids, amount) {\n  const ranked = getRanked();\n  // ... mutate ranked in place ...\n  _rankedDirty = true;\n  // Don't write here — flush in consolidate()\n}\n```\n\n---\n\n",
+        "level": 3
+      },
+      {
+        "title": "2. Regex Recompilation on Every Call",
+        "content": "\n**`router.cjs:routeTask()` — lines 29–48**\n\nEvery task routing call creates 8 `new RegExp(...)` objects, all from static strings that never change.\n\n```javascript\n// CURRENT — router.cjs:32\nfor (const [pattern, agent] of Object.entries(TASK_PATTERNS)) {\n  const regex = new RegExp(pattern, 'i');  // compiled fresh every call\n  if (regex.test(taskLower)) { ... }\n}\n```\n\n**Fix**: Pre-compile once at module load:\n\n```javascript\n// Compile once at startup\nconst COMPILED_PATTERNS = Object.entries(TASK_PATTERNS).map(([pattern, agent]) => ({\n  regex: new RegExp(pattern, 'i'),\n  agent,\n  pattern,\n}));\n\nfunction routeTask(task) {\n  const taskLower = task.toLowerCase();\n  for (const { regex, agent, pattern } of COMPILED_PATTERNS) {\n    if (regex.test(taskLower)) {\n      return { agent, confidence: 0.8, reason: `Matched pattern: ${pattern}` };\n    }\n  }\n  return { agent: 'coder', confidence: 0.5, reason: 'Default routing' };\n}\n```\n\n---\n\n",
+        "level": 3
+      },
+      {
+        "title": "3. Synchronous File Read on Every Status Render",
+        "content": "\n**`statusline.cjs:getLearningStats()` — lines 179–268**\n\nThe statusline is rendered on every `Stop` hook event (potentially every tool call). `getLearningStats()` reads 2–5 files from disk synchronously on each render, including one SQLite header read with raw `fs.openSync/readSync/closeSync`. There's no TTL cache.\n\n```javascript\n// CURRENT — statusline.cjs:179-268\nfunction getLearningStats() {\n  // Reads patterns.json OR auto-memory-store.json OR 3x memory.db paths\n  // + reads session directory listing\n  // — all synchronous, on every render\n}\n```\n\n**Fix**: Memoize with a short TTL (statusline doesn't need sub-second freshness):\n\n```javascript\nlet _learningCache = null;\nlet _learningCacheTime = 0;\nconst LEARNING_CACHE_TTL_MS = 10_000; // 10s is plenty for a status display\n\nfunction getLearningStats() {\n  const now = Date.now();\n  if (_learningCache && now - _learningCacheTime < LEARNING_CACHE_TTL_MS) {\n    return _learningCache;\n  }\n  // ... existing logic ...\n  _learningCache = { patterns, sessions };\n  _learningCacheTime = now;\n  return _learningCache;\n}\n```\n\n---\n\n",
+        "level": 3
+      },
+      {
+        "title": "4. Full File Content Read Just to Count Lines",
+        "content": "\n**`metrics-db.mjs:countFilesAndLines()` — lines 147–173**\n\nReads every `.ts` file's full content into a string just to call `.split('\\n').length`. For large files this is both memory-wasteful and slow.\n\n```javascript\n// CURRENT — metrics-db.mjs:162-165\nconst content = readFileSync(fullPath, 'utf-8');\nlines += content.split('\\n').length;  // loads entire file into memory\n```\n\n**Fix**: Count newlines without loading the full string, or use `statSync` for an estimate, or just count via `\\n` in a buffer scan:\n\n```javascript\nimport { openSync, readSync, closeSync, statSync } from 'fs';\n\nfunction countLines(filePath) {\n  const CHUNK = 65536;\n  const buf = Buffer.alloc(CHUNK);\n  const fd = openSync(filePath, 'r');\n  let count = 1;\n  let bytesRead;\n  try {\n    while ((bytesRead = readSync(fd, buf, 0, CHUNK, null)) > 0) {\n      for (let i = 0; i < bytesRead; i++) {\n        if (buf[i] === 10) count++; // 0x0A = '\\n'\n      }\n    }\n  } finally {\n    closeSync(fd);\n  }\n  return count;\n}\n```\n\n---\n\n",
+        "level": 3
+      },
+      {
+        "title": "5. `execSync('ps aux')` in Metrics Sync",
+        "content": "\n**`metrics-db.mjs:countProcesses()` — lines 226–242**\n\nSpawns a subprocess and reads the full process table on every `syncMetrics()` call. The daemon runs this every 30 seconds.\n\n```javascript\n// CURRENT — metrics-db.mjs:228\nconst ps = execSync('ps aux 2>/dev/null || echo \"\"', { encoding: 'utf-8' });\n```\n\n**Fix**: Since this is Node.js, use `process.pid` and a lightweight pidfile-based check, or just cache the last known value and re-check only every few minutes:\n\n```javascript\nlet _processCache = null;\nlet _processCacheTime = 0;\n\nfunction countProcesses() {\n  const now = Date.now();\n  if (_processCache && now - _processCacheTime < 60_000) return _processCache;  // 1-min TTL\n  try {\n    const ps = execSync('ps aux 2>/dev/null || echo \"\"', { encoding: 'utf-8', timeout: 2000 });\n    _processCache = { /* parse */ };\n    _processCacheTime = now;\n    return _processCache;\n  } catch {\n    return _processCache ?? { agenticFlow: 0, mcp: 0, agents: 0 };\n  }\n}\n```\n\n---\n\n",
+        "level": 3
+      },
+      {
+        "title": "6. Unbatched Write on Every `store()` Call",
+        "content": "\n**`auto-memory-hook.mjs:JsonFileBackend.store()` — line 59**\n\nEvery single `store(entry)` call serializes the entire `entries` Map and writes the full JSON file to disk. During a bulk import this can mean hundreds of sequential full-file writes.\n\n```javascript\n// CURRENT — auto-memory-hook.mjs:59\nasync store(entry) { this.entries.set(entry.id, entry); this._persist(); }\n// _persist() writes JSON.stringify([...this.entries.values()], null, 2) every time\n```\n\n**Fix**: Debounce or batch writes; flush only at the end of bulk operations:\n\n```javascript\n_scheduleFlush() {\n  if (this._flushTimer) return;\n  this._flushTimer = setTimeout(() => {\n    this._flushTimer = null;\n    this._persist();\n  }, 100); // coalesce writes within 100ms\n}\n\nasync store(entry) {\n  this.entries.set(entry.id, entry);\n  this._scheduleFlush();\n}\n\nasync bulkInsert(entries) {\n  for (const e of entries) this.entries.set(e.id, e);\n  this._persist(); // single write for the whole batch\n}\n```\n\n---\n\n",
+        "level": 3
+      },
+      {
+        "title": "7. Session File Read/Write on Every Key Access",
+        "content": "\n**`intelligence.cjs:sessionGet()` / `sessionSet()` — lines 154–174**\n\nBoth functions parse and serialize the full session JSON file on every call — even for a single key lookup. `getContext()` calls `sessionGet` + `sessionSet` on each route invocation.\n\n```javascript\n// CURRENT — reads entire file, parses JSON, returns one value\nfunction sessionGet(key) {\n  const session = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf-8'));\n  return key ? (session.context || {})[key] : session.context;\n}\n```\n\n**Fix**: Keep a module-level in-memory session object and only persist on explicit flush:\n\n```javascript\nlet _session = null;\n\nfunction _loadSession() {\n  if (_session) return _session;\n  try {\n    if (fs.existsSync(SESSION_FILE))\n      _session = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf-8'));\n  } catch {}\n  _session = _session || {};\n  return _session;\n}\n\nfunction sessionGet(key) {\n  const s = _loadSession();\n  return key ? (s.context || {})[key] : s.context;\n}\n\nfunction sessionSet(key, value) {\n  const s = _loadSession();\n  if (!s.context) s.context = {};\n  s.context[key] = value;\n  s.updatedAt = new Date().toISOString();\n  // Write is deferred to consolidate()/session-end\n}\n\n// Call this at session-end:\nfunction flushSession() {\n  if (!_session) return;\n  try {\n    fs.writeFileSync(SESSION_FILE, JSON.stringify(_session, null, 2), 'utf-8');\n  } catch {}\n}\n```\n\n---\n\n",
+        "level": 3
+      },
+      {
+        "title": "Summary Table",
+        "content": "| Location | Issue | Impact | Fix |\n|---|---|---|---|\n| `intelligence.cjs:boostConfidence()` | 4 disk reads + 2 writes per feedback | High frequency | In-memory cache + deferred flush |\n| `router.cjs:routeTask()` | 8 regex recompilations per call | Every tool use | Pre-compile at module load |\n| `statusline.cjs:getLearningStats()` | 5 file reads on every status render | Every Stop event | 10s TTL memoization |\n| `metrics-db.mjs:countFilesAndLines()` | Full file content loaded to count lines | Every 30s sync | Stream/buffer newline count |\n| `metrics-db.mjs:countProcesses()` | `execSync('ps aux')` every 30s | Subprocess spawn overhead | 60s TTL cache |\n| `auto-memory-hook.mjs:store()` | Full JSON serialized per entry during bulk import | Session start | Debounced/batched writes |\n| `intelligence.cjs:sessionGet/Set()` | Full file parse/write per key access | Every route call | In-memory session object |\n\nThe highest-impact changes are items 1 (the `boostConfidence` disk I/O pattern) and 6 (unbatched writes during bulk memory import), as these fire on the critical path of every edit and every session start respectively.",
+        "level": 3
+      }
+    ],
+    "codeBlocks": [
+      {
+        "language": "javascript",
+        "code": "// CURRENT — in boostConfidence() at intelligence.cjs:587\nfunction boostConfidence(ids, amount) {\n  const ranked = readJSON(RANKED_PATH);   // disk read #1\n  // ...\n  if (changed) writeJSON(RANKED_PATH, ranked);  // disk write #1\n\n  const graph = readJSON(GRAPH_PATH);     // disk read #2\n  // ...\n  writeJSON(GRAPH_PATH, graph);           // disk write #2\n}\n\n// ALSO: getContext() calls both sessionGet() (reads SESSION_FILE)\n// AND boostConfidence() (reads RANKED_PATH again after just reading it above)"
+      },
+      {
+        "language": "javascript",
+        "code": "let _rankedCache = null;\nlet _rankedDirty = false;\n\nfunction getRanked() {\n  if (_rankedCache) return _rankedCache;\n  _rankedCache = readJSON(RANKED_PATH);\n  return _rankedCache;\n}\n\nfunction flushRanked() {\n  if (_rankedDirty && _rankedCache) {\n    writeJSON(RANKED_PATH, _rankedCache);\n    _rankedDirty = false;\n  }\n}\n\nfunction boostConfidence(ids, amount) {\n  const ranked = getRanked();\n  // ... mutate ranked in place ...\n  _rankedDirty = true;\n  // Don't write here — flush in consolidate()\n}"
+      },
+      {
+        "language": "javascript",
+        "code": "// CURRENT — router.cjs:32\nfor (const [pattern, agent] of Object.entries(TASK_PATTERNS)) {\n  const regex = new RegExp(pattern, 'i');  // compiled fresh every call\n  if (regex.test(taskLower)) { ... }\n}"
+      },
+      {
+        "language": "javascript",
+        "code": "// Compile once at startup\nconst COMPILED_PATTERNS = Object.entries(TASK_PATTERNS).map(([pattern, agent]) => ({\n  regex: new RegExp(pattern, 'i'),\n  agent,\n  pattern,\n}));\n\nfunction routeTask(task) {\n  const taskLower = task.toLowerCase();\n  for (const { regex, agent, pattern } of COMPILED_PATTERNS) {\n    if (regex.test(taskLower)) {\n      return { agent, confidence: 0.8, reason: `Matched pattern: ${pattern}` };\n    }\n  }\n  return { agent: 'coder', confidence: 0.5, reason: 'Default routing' };\n}"
+      },
+      {
+        "language": "javascript",
+        "code": "// CURRENT — statusline.cjs:179-268\nfunction getLearningStats() {\n  // Reads patterns.json OR auto-memory-store.json OR 3x memory.db paths\n  // + reads session directory listing\n  // — all synchronous, on every render\n}"
+      },
+      {
+        "language": "javascript",
+        "code": "let _learningCache = null;\nlet _learningCacheTime = 0;\nconst LEARNING_CACHE_TTL_MS = 10_000; // 10s is plenty for a status display\n\nfunction getLearningStats() {\n  const now = Date.now();\n  if (_learningCache && now - _learningCacheTime < LEARNING_CACHE_TTL_MS) {\n    return _learningCache;\n  }\n  // ... existing logic ...\n  _learningCache = { patterns, sessions };\n  _learningCacheTime = now;\n  return _learningCache;\n}"
+      },
+      {
+        "language": "javascript",
+        "code": "// CURRENT — metrics-db.mjs:162-165\nconst content = readFileSync(fullPath, 'utf-8');\nlines += content.split('\\n').length;  // loads entire file into memory"
+      },
+      {
+        "language": "javascript",
+        "code": "import { openSync, readSync, closeSync, statSync } from 'fs';\n\nfunction countLines(filePath) {\n  const CHUNK = 65536;\n  const buf = Buffer.alloc(CHUNK);\n  const fd = openSync(filePath, 'r');\n  let count = 1;\n  let bytesRead;\n  try {\n    while ((bytesRead = readSync(fd, buf, 0, CHUNK, null)) > 0) {\n      for (let i = 0; i < bytesRead; i++) {\n        if (buf[i] === 10) count++; // 0x0A = '\\n'\n      }\n    }\n  } finally {\n    closeSync(fd);\n  }\n  return count;\n}"
+      },
+      {
+        "language": "javascript",
+        "code": "// CURRENT — metrics-db.mjs:228\nconst ps = execSync('ps aux 2>/dev/null || echo \"\"', { encoding: 'utf-8' });"
+      },
+      {
+        "language": "javascript",
+        "code": "let _processCache = null;\nlet _processCacheTime = 0;\n\nfunction countProcesses() {\n  const now = Date.now();\n  if (_processCache && now - _processCacheTime < 60_000) return _processCache;  // 1-min TTL\n  try {\n    const ps = execSync('ps aux 2>/dev/null || echo \"\"', { encoding: 'utf-8', timeout: 2000 });\n    _processCache = { /* parse */ };\n    _processCacheTime = now;\n    return _processCache;\n  } catch {\n    return _processCache ?? { agenticFlow: 0, mcp: 0, agents: 0 };\n  }\n}"
+      },
+      {
+        "language": "javascript",
+        "code": "// CURRENT — auto-memory-hook.mjs:59\nasync store(entry) { this.entries.set(entry.id, entry); this._persist(); }\n// _persist() writes JSON.stringify([...this.entries.values()], null, 2) every time"
+      },
+      {
+        "language": "javascript",
+        "code": "_scheduleFlush() {\n  if (this._flushTimer) return;\n  this._flushTimer = setTimeout(() => {\n    this._flushTimer = null;\n    this._persist();\n  }, 100); // coalesce writes within 100ms\n}\n\nasync store(entry) {\n  this.entries.set(entry.id, entry);\n  this._scheduleFlush();\n}\n\nasync bulkInsert(entries) {\n  for (const e of entries) this.entries.set(e.id, e);\n  this._persist(); // single write for the whole batch\n}"
+      },
+      {
+        "language": "javascript",
+        "code": "// CURRENT — reads entire file, parses JSON, returns one value\nfunction sessionGet(key) {\n  const session = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf-8'));\n  return key ? (session.context || {})[key] : session.context;\n}"
+      },
+      {
+        "language": "javascript",
+        "code": "let _session = null;\n\nfunction _loadSession() {\n  if (_session) return _session;\n  try {\n    if (fs.existsSync(SESSION_FILE))\n      _session = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf-8'));\n  } catch {}\n  _session = _session || {};\n  return _session;\n}\n\nfunction sessionGet(key) {\n  const s = _loadSession();\n  return key ? (s.context || {})[key] : s.context;\n}\n\nfunction sessionSet(key, value) {\n  const s = _loadSession();\n  if (!s.context) s.context = {};\n  s.context[key] = value;\n  s.updatedAt = new Date().toISOString();\n  // Write is deferred to consolidate()/session-end\n}\n\n// Call this at session-end:\nfunction flushSession() {\n  if (!_session) return;\n  try {\n    fs.writeFileSync(SESSION_FILE, JSON.stringify(_session, null, 2), 'utf-8');\n  } catch {}\n}"
+      }
+    ]
+  },
+  "rawOutputPreview": "Now I have enough to give a thorough analysis. Let me compile the findings.\n\n---\n\n## Performance Analysis: Crucible_Tools\n\nThis is a Node.js-based agent orchestration system, not a React app. There are no SQL ORMs or React components — the relevant patterns are **redundant disk I/O**, **repeated regex compilation**, **unbatched writes**, and **unthrottled sync calls**.\n\n---\n\n### 1. Redundant Disk Reads — \"N+1 File Read\" Pattern\n\n**`intelligence.cjs` — `boostConfidence()` reads two files on every feedback call**\n\nCalled from both `getContext()` (line ~545) and `feedback()` (line ~580), this function reads `RANKED_PATH` and `GRAPH_PATH`, modifies them, and writes both back — 4 reads + 2 writes per invocation.\n\n```javascript\n// CURRENT — in boostConfidence() at intelligence.cjs:587\nfunction boostConfidence(ids, amount) {\n  const ranked = readJSON(RANKED_PATH);   // disk read #1\n  // ...\n  if (changed) writeJSON(RANKED_PATH, ranked);  // disk write #1\n\n  const graph = readJSON(GRAPH_PATH);     // disk read #2\n  // ...\n  writeJSON(GRAPH_PATH, graph);           // disk write #2\n}\n\n// ALSO: getContext() calls both sessionGet() (reads SESSION_FILE)\n// AND boostConfidence() (reads RANKED_PATH again after just reading it above)\n```\n\n**Fix**: Cache the loaded objects in module-level variables and mark them dirty, then flush only at `consolidate()`:\n\n```javascript\nlet _rankedCache = null;\nlet _rankedDirty = false;\n\nfunction getRanked() {\n  if (_rankedCache) return _rankedCache;\n  _rankedCache = readJSON(RANKED_PATH);\n  return _rankedCache;\n}\n\nfunction flushRanked() {\n  if (_rankedDirty && _rankedCache) {\n    writeJSON(RANKED_PATH, _rankedCache);\n    _rankedDirty = false;\n  }\n}\n\nfunction boostConfidence(ids, amount) {\n  const ranked = getRanked();\n  // ... mutate ranked in place ...\n  _rankedDirty = true;\n  // Don't write here — flush in consolidate()\n}\n```\n\n---\n\n### 2. Regex Recompilation on Every Call\n\n**`router.cjs:routeTask()` — lines 29–48**\n\nEvery task routing call creates",
+  "rawOutputLength": 9684
+}
