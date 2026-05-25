@@ -1,70 +1,81 @@
 {
-  "timestamp": "2026-05-25T10:00:42.135Z",
+  "timestamp": "2026-05-25T15:10:52.313Z",
   "mode": "headless",
   "workerType": "audit",
   "model": "haiku",
-  "durationMs": 42928,
-  "executionId": "audit_1779703199207_waypeo",
+  "durationMs": 65124,
+  "executionId": "audit_1779721787189_n23bj1",
   "success": true,
   "findings": {
     "vulnerabilities": [
       {
         "severity": "medium",
-        "file": ".claude/helpers/github-safe.js",
-        "line": 93,
-        "description": "Temporary file created without explicit permission restrictions. writeFileSync(tmpFile, body, 'utf8') uses default permissions which may be world-readable. An attacker with local access could read sensitive GitHub body content before the file is deleted."
-      },
-      {
-        "severity": "medium",
         "file": ".claude/helpers/session.js",
-        "line": 18,
-        "description": "Session files stored with world-readable permissions (644). Session context data containing potentially sensitive information is accessible to other local users. File created with writeFileSync without mode parameter."
+        "line": 30,
+        "description": "Session files created with default permissions (644), allowing other users on the system to read sensitive context data. Use fs.writeFileSync with mode 0o600 to restrict to owner only."
       },
       {
         "severity": "medium",
         "file": ".claude/helpers/memory.js",
-        "line": 17,
-        "description": "Memory data stored in plaintext JSON without encryption. All stored data including context, keys, and values are readable in cleartext. No access controls on .claude-flow/data/memory.json file."
+        "line": 26,
+        "description": "Memory files created with default permissions (644). Sensitive data stored in plain text JSON without encryption. Should use restrictive file permissions (0o600) and consider encrypting values."
       },
       {
         "severity": "medium",
-        "file": ".claude/helpers/statusline.js",
-        "line": 72,
-        "description": "Git command execution output (branch name) displayed without sanitization. While using execFileSync prevents injection, malicious branch names could display ANSI codes or control characters that cause terminal hijacking."
+        "file": ".claude/helpers/session.js",
+        "line": 96,
+        "description": "Session context can store arbitrary sensitive data (API keys, tokens) in plain text. No encryption applied. Context should be sanitized or encrypted before storage."
+      },
+      {
+        "severity": "medium",
+        "file": ".claude/helpers/session.js",
+        "line": 89,
+        "description": "No access control or authorization checks. Any process on the system can call session.update() to modify session data maliciously."
+      },
+      {
+        "severity": "medium",
+        "file": ".claude/helpers/memory.js",
+        "line": 37,
+        "description": "No input validation on memory keys/values. Missing authorization checks. Any process can set arbitrary data including malicious payloads."
+      },
+      {
+        "severity": "medium",
+        "file": ".claude/helpers/github-safe.js",
+        "line": 93,
+        "description": "Temporary files created with default permissions (likely 644). On multi-user systems, temp file contents (GitHub bodies) could be world-readable before cleanup. Use mode 0o600."
+      },
+      {
+        "severity": "low",
+        "file": ".claude/helpers/memory.js",
+        "line": 19,
+        "description": "Silent error handling when loading memory file. Errors are caught but ignored, potentially masking data corruption or access issues."
       },
       {
         "severity": "low",
         "file": ".claude/helpers/router.js",
-        "line": 30,
-        "description": "Missing validation of routed agent. The route function returns an agent name that may not exist in AGENT_CAPABILITIES. No error handling if the returned agent is not available in the system."
-      },
-      {
-        "severity": "low",
-        "file": ".claude/helpers/memory.js",
-        "line": 12,
-        "description": "Race condition possible: loadMemory() does not use file locks. Multiple concurrent calls to set/delete could cause data loss or corruption if operations overlap."
+        "line": 37,
+        "description": "RegExp created from user input via process.argv without escaping. If task input is untrusted, ReDoS attacks possible, though impact is limited to DoS within router."
       },
       {
         "severity": "low",
         "file": ".claude/helpers/session.js",
-        "line": 47,
-        "description": "Insufficient input validation in session.update(). The key and value parameters are not validated before being stored in session context, allowing arbitrary data injection."
+        "line": 95,
+        "description": "Non-atomic read-modify-write in session.update(). Concurrent access could cause data loss if multiple processes modify sessions simultaneously."
       }
     ],
     "riskScore": 42,
     "recommendations": [
-      "Set explicit file permissions on temp files: use fs.writeFileSync with mode 0o600 (owner-only) for sensitive data",
-      "Encrypt session context data using crypto module before storing to disk, decrypt on read",
-      "Store memory.json with restrictive permissions (mode 0o600) and consider encrypting keys with sensitive values",
-      "Sanitize git output: remove ANSI escape sequences and control characters from branch names before display",
-      "Add validation in router.js to verify returned agent exists in AGENT_CAPABILITIES map",
-      "Implement file locking (using flock or similar) for memory.json access to prevent race conditions",
-      "Add input validation in session.update() to restrict context keys to a whitelist of known safe keys",
-      "Document that github-safe.js should only be used with trusted callers, as the tmpdir() is world-accessible",
-      "Consider using a secure temporary directory or in-memory buffer for sensitive data instead of /tmp",
-      "Add file ownership checks to verify session/memory files are only readable by the current user"
+      "Set restrictive file permissions (0o600) when creating session.json, memory.json, and temp files. Use fs.writeFileSync(path, data, {mode: 0o600}) or fs.chmodSync() after creation.",
+      "Encrypt sensitive context data at rest. Consider using crypto module to encrypt/decrypt session context values before storage.",
+      "Add input validation to memory.js set/delete operations. Reject suspicious keys (e.g., containing path traversal patterns like '../').",
+      "Implement basic access control by storing user/process info with session data and validating on read/write operations.",
+      "Replace silent error catches. Log meaningful errors to stderr for debugging while still handling gracefully.",
+      "Use fs.promises and implement atomic file operations or file locking for concurrent access safety.",
+      "Sanitize user input in router.js by escaping RegExp special characters: `task.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')`",
+      "No hardcoded secrets found (✓) but document secure credential handling in code comments.",
+      "No SQL injection, XSS, or dependency vulnerabilities detected in provided code, though full npm audit recommended."
     ]
   },
-  "rawOutputPreview": "Now I'll compile the security analysis report:\n\n```json\n{\n  \"vulnerabilities\": [\n    {\n      \"severity\": \"medium\",\n      \"file\": \".claude/helpers/github-safe.js\",\n      \"line\": 93,\n      \"description\": \"Temporary file created without explicit permission restrictions. writeFileSync(tmpFile, body, 'utf8') uses default permissions which may be world-readable. An attacker with local access could read sensitive GitHub body content before the file is deleted.\"\n    },\n    {\n      \"severity\": \"medium\",\n      \"file\": \".claude/helpers/session.js\",\n      \"line\": 18,\n      \"description\": \"Session files stored with world-readable permissions (644). Session context data containing potentially sensitive information is accessible to other local users. File created with writeFileSync without mode parameter.\"\n    },\n    {\n      \"severity\": \"medium\",\n      \"file\": \".claude/helpers/memory.js\",\n      \"line\": 17,\n      \"description\": \"Memory data stored in plaintext JSON without encryption. All stored data including context, keys, and values are readable in cleartext. No access controls on .claude-flow/data/memory.json file.\"\n    },\n    {\n      \"severity\": \"medium\",\n      \"file\": \".claude/helpers/statusline.js\",\n      \"line\": 72,\n      \"description\": \"Git command execution output (branch name) displayed without sanitization. While using execFileSync prevents injection, malicious branch names could display ANSI codes or control characters that cause terminal hijacking.\"\n    },\n    {\n      \"severity\": \"low\",\n      \"file\": \".claude/helpers/router.js\",\n      \"line\": 30,\n      \"description\": \"Missing validation of routed agent. The route function returns an agent name that may not exist in AGENT_CAPABILITIES. No error handling if the returned agent is not available in the system.\"\n    },\n    {\n      \"severity\": \"low\",\n      \"file\": \".claude/helpers/memory.js\",\n      \"line\": 12,\n      \"description\": \"Race condition possible: loadMemory() does not use file locks. Multiple concurrent calls to se",
-  "rawOutputLength": 4199
+  "rawOutputPreview": "Based on my analysis of the codebase, here's the security assessment:\n\n```json\n{\n  \"vulnerabilities\": [\n    {\n      \"severity\": \"medium\",\n      \"file\": \".claude/helpers/session.js\",\n      \"line\": 30,\n      \"description\": \"Session files created with default permissions (644), allowing other users on the system to read sensitive context data. Use fs.writeFileSync with mode 0o600 to restrict to owner only.\"\n    },\n    {\n      \"severity\": \"medium\",\n      \"file\": \".claude/helpers/memory.js\",\n      \"line\": 26,\n      \"description\": \"Memory files created with default permissions (644). Sensitive data stored in plain text JSON without encryption. Should use restrictive file permissions (0o600) and consider encrypting values.\"\n    },\n    {\n      \"severity\": \"medium\",\n      \"file\": \".claude/helpers/session.js\",\n      \"line\": 96,\n      \"description\": \"Session context can store arbitrary sensitive data (API keys, tokens) in plain text. No encryption applied. Context should be sanitized or encrypted before storage.\"\n    },\n    {\n      \"severity\": \"medium\",\n      \"file\": \".claude/helpers/session.js\",\n      \"line\": 89,\n      \"description\": \"No access control or authorization checks. Any process on the system can call session.update() to modify session data maliciously.\"\n    },\n    {\n      \"severity\": \"medium\",\n      \"file\": \".claude/helpers/memory.js\",\n      \"line\": 37,\n      \"description\": \"No input validation on memory keys/values. Missing authorization checks. Any process can set arbitrary data including malicious payloads.\"\n    },\n    {\n      \"severity\": \"medium\",\n      \"file\": \".claude/helpers/github-safe.js\",\n      \"line\": 93,\n      \"description\": \"Temporary files created with default permissions (likely 644). On multi-user systems, temp file contents (GitHub bodies) could be world-readable before cleanup. Use mode 0o600.\"\n    },\n    {\n      \"severity\": \"low\",\n      \"file\": \".claude/helpers/memory.js\",\n      \"line\": 19,\n      \"description\": \"Silent error handling when loading",
+  "rawOutputLength": 4358
 }

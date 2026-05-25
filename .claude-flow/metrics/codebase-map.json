@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-05-25T10:01:54.424Z",
+  "timestamp": "2026-05-25T15:09:47.162Z",
   "projectRoot": "/Users/mayankpatel/Desktop/Crucible_Tools",
   "structure": {
     "hasPackageJson": false,
@@ -7,5 +7,5 @@
     "hasClaudeConfig": true,
     "hasClaudeFlow": true
   },
-  "scannedAt": 1779703314424
+  "scannedAt": 1779721787162
 }
